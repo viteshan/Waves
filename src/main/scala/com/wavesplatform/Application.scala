@@ -104,7 +104,7 @@ class Application(val actorSystem: ActorSystem, val settings: WavesSettings, con
       new UtxPoolImpl(time, blockchainUpdater, settings.blockchainSettings.functionalitySettings, settings.utxSettings)
 
     matcher = if (settings.matcherSettings.enable) {
-      Matcher(actorSystem, wallet, innerUtxStorage, allChannels, blockchainUpdater, settings)
+      Matcher(actorSystem, wallet, innerUtxStorage, allChannels, blockchainUpdater, settings, () => shutdownInProgress)
     } else None
 
     val utxStorage =

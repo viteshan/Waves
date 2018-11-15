@@ -5,6 +5,7 @@ import java.util.concurrent.atomic.AtomicReference
 import akka.actor.{Actor, ActorRef, PoisonPill, Props, Terminated}
 import akka.persistence.{PersistentActor, RecoveryCompleted, _}
 import com.google.common.base.Charsets
+import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
 import com.wavesplatform.matcher.MatcherSettings
 import com.wavesplatform.matcher.api.{DuringShutdown, OrderBookUnavailable}
 import com.wavesplatform.matcher.market.OrderBookActor._
@@ -97,12 +98,9 @@ class MatcherActor(orderBooks: AtomicReference[Map[AssetPair, Either[Unit, Actor
   private def forwardToOrderBook: Receive = {
     case GetMarkets => sender() ! tradedPairs.values.toSeq
 
-    case order: Order =>
-      runFor(order.assetPair)((sender, orderBook) => orderBook.tell(order, sender))
-
-    case deleteOrder: DeleteOrderBookRequest =>
+    case request @ Request(_, deleteOrder: DeleteOrderBookRequest) =>
       runFor(deleteOrder.assetPair) { (sender, ref) =>
-        ref.tell(deleteOrder, sender)
+        ref.tell(request, sender)
         orderBooks.getAndUpdate(_.filterNot { x =>
           x._2.right.exists(_ == ref)
         })
@@ -111,6 +109,9 @@ class MatcherActor(orderBooks: AtomicReference[Map[AssetPair, Either[Unit, Actor
         deleteMessages(lastSequenceNr)
         saveSnapshot(Snapshot(tradedPairs.keySet))
       }
+
+    case request @ Request(_, x: Order)        => runFor(x.assetPair)((_, orderBook) => orderBook ! request)
+    case request @ Request(_, x: HasAssetPair) => runFor(x.assetPair)((_, orderBook) => orderBook ! request)
 
     case Shutdown =>
       shutdownStatus = shutdownStatus.copy(
@@ -231,13 +232,22 @@ object MatcherActor {
             allChannels: ChannelGroup,
             settings: MatcherSettings,
             assetDescription: ByteStr => Option[AssetDescription],
-            createTransaction: OrderExecuted => Either[ValidationError, ExchangeTransaction]): Props =
+            createTransaction: OrderExecuted => Either[ValidationError, ExchangeTransaction],
+            requestResolver: RequestResolver): Props =
     Props(
       new MatcherActor(
         orderBooks,
         (assetPair, matcher) =>
           OrderBookActor
-            .props(matcher, assetPair, updateSnapshot(assetPair), updateMarketStatus(assetPair), utx, allChannels, settings, createTransaction),
+            .props(matcher,
+                   assetPair,
+                   updateSnapshot(assetPair),
+                   updateMarketStatus(assetPair),
+                   utx,
+                   allChannels,
+                   settings,
+                   requestResolver,
+                   createTransaction),
         assetDescription
       ))
 
@@ -255,6 +265,8 @@ object MatcherActor {
     def isCompleted: Boolean = initiated && oldMessagesDeleted && oldSnapshotsDeleted && orderBooksStopped
     def tryComplete(): Unit  = if (isCompleted) onComplete()
   }
+
+  case class Request[T](id: RequestId, payload: T)
 
   case object SaveSnapshot
 

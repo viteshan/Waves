@@ -6,12 +6,12 @@ import akka.actor.{ActorRef, Props}
 import akka.testkit.{ImplicitSender, TestProbe}
 import com.wavesplatform.NTPTime
 import com.wavesplatform.OrderOps._
-import com.wavesplatform.matcher.MatcherTestData
 import com.wavesplatform.matcher.api.{OrderAccepted, OrderCanceled}
 import com.wavesplatform.matcher.fixtures.RestartableActor
 import com.wavesplatform.matcher.fixtures.RestartableActor.RestartActor
 import com.wavesplatform.matcher.market.OrderBookActor._
 import com.wavesplatform.matcher.model._
+import com.wavesplatform.matcher.{Matcher, MatcherTestData}
 import com.wavesplatform.settings.Constants
 import com.wavesplatform.state.{ByteStr, Diff}
 import com.wavesplatform.transaction._
@@ -50,8 +50,16 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
     val allChannels = stub[ChannelGroup]
     val actor = system.actorOf(
       Props(
-        new OrderBookActor(TestProbe().ref, pair, update(pair), p => Option(md.get(p)), utx, allChannels, matcherSettings, txFactory, ntpTime)
-        with RestartableActor))
+        new OrderBookActor(TestProbe().ref,
+                           pair,
+                           update(pair),
+                           p => Option(md.get(p)),
+                           utx,
+                           allChannels,
+                           matcherSettings,
+                           akkaRequestResolver(ActorRef.noSender),
+                           txFactory,
+                           ntpTime) with RestartableActor))
 
     f(pair, actor)
   }
@@ -63,11 +71,11 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = buy(pair, 170484969L, 34120)
       val ord3 = buy(pair, 44521418496L, 34000)
 
-      actor ! ord1
+      actor ! Matcher.wrap(ord1)
       expectMsg(OrderAccepted(ord1))
-      actor ! ord2
+      actor ! Matcher.wrap(ord2)
       expectMsg(OrderAccepted(ord2))
-      actor ! ord3
+      actor ! Matcher.wrap(ord3)
       expectMsg(OrderAccepted(ord3))
 
       actor ! GetOrdersRequest
@@ -79,11 +87,11 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = sell(pair, 170484969L, 34220)
       val ord3 = sell(pair, 44521418496L, 34000)
 
-      actor ! ord1
+      actor ! Matcher.wrap(ord1)
       expectMsg(OrderAccepted(ord1))
-      actor ! ord2
+      actor ! Matcher.wrap(ord2)
       expectMsg(OrderAccepted(ord2))
-      actor ! ord3
+      actor ! Matcher.wrap(ord3)
       expectMsg(OrderAccepted(ord3))
 
       actor ! GetOrdersRequest
@@ -94,14 +102,14 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord1 = buy(pair, 10 * Order.PriceConstant, 100)
       val ord2 = buy(pair, 10 * Order.PriceConstant, 105)
 
-      actor ! ord1
-      actor ! ord2
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
       receiveN(2)
       actor ! GetOrdersRequest
       expectMsg(GetOrdersResponse(Seq(BuyLimitOrder(ord2.amount, ord2.matcherFee, ord2), BuyLimitOrder(ord1.amount, ord1.matcherFee, ord1))))
 
       val ord3 = sell(pair, 10 * Order.PriceConstant, 100)
-      actor ! ord3
+      actor ! Matcher.wrap(ord3)
       expectMsg(OrderAccepted(ord3))
 
       actor ! GetOrdersRequest
@@ -112,8 +120,8 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord1 = buy(pair, 10 * Order.PriceConstant, 100)
       val ord2 = sell(pair, 15 * Order.PriceConstant, 150)
 
-      actor ! ord1
-      actor ! ord2
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
       receiveN(2)
 
       actor ! RestartActor
@@ -126,9 +134,9 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord1 = buy(pair, 10 * Order.PriceConstant, 100)
       val ord2 = sell(pair, 15 * Order.PriceConstant, 100)
 
-      actor ! ord1
+      actor ! Matcher.wrap(ord1)
       expectMsgType[OrderAccepted]
-      actor ! ord2
+      actor ! Matcher.wrap(ord2)
       expectMsgType[OrderAccepted]
 
       actor ! RestartActor
@@ -149,9 +157,9 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = buy(pair, 5 * Order.PriceConstant, 100)
       val ord3 = sell(pair, 12 * Order.PriceConstant, 100)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
       receiveN(3)
 
       actor ! RestartActor
@@ -177,10 +185,10 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord3 = sell(pair, 5 * Order.PriceConstant, 90)
       val ord4 = buy(pair, 19 * Order.PriceConstant, 100)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
-      actor ! ord4
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
+      actor ! Matcher.wrap(ord4)
       receiveN(4)
 
       actor ! RestartActor
@@ -207,10 +215,10 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord3 = sell(pair, 10 * Order.PriceConstant, 110)
       val ord4 = buy(pair, 22 * Order.PriceConstant, 115)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
-      actor ! ord4
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
+      actor ! Matcher.wrap(ord4)
       receiveN(4)
 
       actor ! GetBidOrdersRequest
@@ -233,7 +241,7 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ts   = System.currentTimeMillis()
 
       (1 to 100).foreach({ i =>
-        actor ! ord1.updateTimestamp(ts + i)
+        actor ! Matcher.wrap(ord1.updateTimestamp(ts + i))
       })
 
       within(10.seconds) {
@@ -262,14 +270,23 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       }
       val allChannels = stub[ChannelGroup]
       val actor = system.actorOf(
-        Props(new OrderBookActor(TestProbe().ref, pair, update(pair), m => md.put(pair, m), pool, allChannels, matcherSettings, txFactory, ntpTime)
-        with RestartableActor))
+        Props(
+          new OrderBookActor(TestProbe().ref,
+                             pair,
+                             update(pair),
+                             m => md.put(pair, m),
+                             pool,
+                             allChannels,
+                             matcherSettings,
+                             akkaRequestResolver(ActorRef.noSender),
+                             txFactory,
+                             ntpTime) with RestartableActor))
 
-      actor ! ord1
+      actor ! Matcher.wrap(ord1)
       expectMsg(OrderAccepted(ord1))
-      actor ! invalidOrd
+      actor ! Matcher.wrap(invalidOrd)
       expectMsg(OrderAccepted(invalidOrd))
-      actor ! ord2
+      actor ! Matcher.wrap(ord2)
       expectMsg(OrderAccepted(ord2))
 
       actor ! RestartActor
@@ -295,9 +312,9 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = sell(pair, 100000000, 0.0004)
       val ord3 = buy(pair, 100000001, 0.00045)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
       receiveN(3)
 
       actor ! GetAskOrdersRequest
@@ -310,9 +327,9 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = sell(pair, 3075248828L, 0.00067634)
       val ord3 = buy(pair, 3075363900L, 0.00073697)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
       receiveN(3)
 
       actor ! GetAskOrdersRequest
@@ -331,9 +348,9 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val ord2 = sell(pair, (0.01 * Constants.UnitsInWave).toLong, 1840)
       val ord3 = buy(pair, (0.0100001 * Constants.UnitsInWave).toLong, 2000)
 
-      actor ! ord1
-      actor ! ord2
-      actor ! ord3
+      actor ! Matcher.wrap(ord1)
+      actor ! Matcher.wrap(ord2)
+      actor ! Matcher.wrap(ord3)
       receiveN(3)
 
       actor ! GetAskOrdersRequest
@@ -346,8 +363,8 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val p = AssetPair(Some(ByteStr("WAVES".getBytes)), Some(ByteStr("USD".getBytes)))
       val b = rawBuy(p, 700000L, 280)
       val s = rawSell(p, 30000000000L, 280)
-      actor ! s
-      actor ! b
+      actor ! Matcher.wrap(s)
+      actor ! Matcher.wrap(b)
       receiveN(2)
 
       actor ! GetAskOrdersRequest
@@ -366,7 +383,7 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val price  = 34118
 
       val expiredOrder = buy(pair, amount, price).updateExpiration(ts)
-      actor ! expiredOrder
+      actor ! Matcher.wrap(expiredOrder)
       receiveN(1)
       getOrders(actor) shouldEqual Seq(BuyLimitOrder(amount, expiredOrder.matcherFee, expiredOrder))
       actor ! OrderCleanup
@@ -381,7 +398,7 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val order          = buy(pair, amount, price)
       val expectedOrders = Seq(BuyLimitOrder(amount, order.matcherFee, order))
 
-      actor ! order
+      actor ! Matcher.wrap(order)
       receiveN(1)
       getOrders(actor) shouldEqual expectedOrders
       actor ! OrderCleanup

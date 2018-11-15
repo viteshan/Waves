@@ -1,6 +1,7 @@
 package com.wavesplatform.matcher
 
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
@@ -12,7 +13,8 @@ import akka.stream.ActorMaterializer
 import com.wavesplatform.account.{Address, PrivateKeyAccount}
 import com.wavesplatform.api.http.CompositeHttpService
 import com.wavesplatform.db._
-import com.wavesplatform.matcher.api.{MatcherApiRoute, OrderBookSnapshotHttpCache}
+import com.wavesplatform.matcher.api.{MatcherApiRoute, MatcherResponse, OrderBookSnapshotHttpCache}
+import com.wavesplatform.matcher.market.MatcherActor.Request
 import com.wavesplatform.matcher.market.OrderBookActor.MarketStatus
 import com.wavesplatform.matcher.market.{MatcherActor, MatcherTransactionWriter, OrderHistoryActor}
 import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook, OrderValidator}
@@ -24,8 +26,8 @@ import com.wavesplatform.utx.UtxPool
 import com.wavesplatform.wallet.Wallet
 import io.netty.channel.group.ChannelGroup
 
-import scala.concurrent.Await
 import scala.concurrent.duration._
+import scala.concurrent.{Await, Future}
 import scala.util.control.NonFatal
 
 class Matcher(actorSystem: ActorSystem,
@@ -33,7 +35,8 @@ class Matcher(actorSystem: ActorSystem,
               allChannels: ChannelGroup,
               blockchain: Blockchain,
               settings: WavesSettings,
-              matcherPrivateKey: PrivateKeyAccount)
+              matcherPrivateKey: PrivateKeyAccount,
+              isDuringShutdown: () => Boolean)
     extends ScorexLogging {
 
   import settings._
@@ -65,6 +68,8 @@ class Matcher(actorSystem: ActorSystem,
     orderBooksSnapshotCache.invalidate(assetPair)
   }
 
+  private val commandBus = new CommandBus
+
   lazy val matcherApiRoutes = Seq(
     MatcherApiRoute(
       pairBuilder,
@@ -73,8 +78,10 @@ class Matcher(actorSystem: ActorSystem,
       orderHistory,
       p => Option(orderBooks.get()).flatMap(_.get(p)),
       p => Option(marketStatuses.get(p)),
+      commandBus.sendRequest(matcher),
       orderBooksSnapshotCache,
       settings,
+      isDuringShutdown,
       db,
       NTP
     )
@@ -94,7 +101,8 @@ class Matcher(actorSystem: ActorSystem,
       allChannels,
       matcherSettings,
       blockchain.assetDescription,
-      transactionCreator.createTransaction
+      transactionCreator.createTransaction,
+      commandBus.resolveRequest
     ),
     MatcherActor.name
   )
@@ -147,19 +155,26 @@ class Matcher(actorSystem: ActorSystem,
 }
 
 object Matcher extends ScorexLogging {
+  type RequestId       = UUID
+  type RequestSender   = Any => Future[MatcherResponse]
+  type RequestResolver = (RequestId, MatcherResponse) => Unit
+
+  def wrap[T](payload: T): Request[T] = Request(UUID.randomUUID(), payload)
+
   def apply(actorSystem: ActorSystem,
             wallet: Wallet,
             utx: UtxPool,
             allChannels: ChannelGroup,
             blockchain: Blockchain,
-            settings: WavesSettings): Option[Matcher] =
+            settings: WavesSettings,
+            isDuringShutdown: () => Boolean): Option[Matcher] =
     try {
       val privateKey = (for {
         address <- Address.fromString(settings.matcherSettings.account)
         pk      <- wallet.privateKeyAccount(address)
       } yield pk).explicitGet()
 
-      val matcher = new Matcher(actorSystem, utx, allChannels, blockchain, settings, privateKey)
+      val matcher = new Matcher(actorSystem, utx, allChannels, blockchain, settings, privateKey, isDuringShutdown)
       matcher.runMatcher()
       Some(matcher)
     } catch {
