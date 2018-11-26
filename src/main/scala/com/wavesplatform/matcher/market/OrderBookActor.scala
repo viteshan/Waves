@@ -20,7 +20,6 @@ import com.wavesplatform.transaction.ValidationError
 import com.wavesplatform.transaction.ValidationError.{AccountBalanceError, HasScriptType, NegativeAmount, OrderValidationError}
 import com.wavesplatform.transaction.assets.exchange._
 import com.wavesplatform.utils.{NTP, ScorexLogging, Time}
-import com.wavesplatform.utx.UtxPool
 import io.netty.channel.group.ChannelGroup
 import kamon.Kamon
 import play.api.libs.json._
@@ -31,7 +30,6 @@ class OrderBookActor(parent: ActorRef,
                      assetPair: AssetPair,
                      updateSnapshot: OrderBook => Unit,
                      updateMarketStatus: MarketStatus => Unit,
-                     utx: UtxPool,
                      allChannels: ChannelGroup,
                      settings: MatcherSettings,
                      resolveRequest: RequestResolver,
@@ -191,7 +189,6 @@ class OrderBookActor(parent: ActorRef,
       Some(event.submitted)
     }
 
-    log.debug(s"Failed to execute order: $err")
     err match {
       case OrderValidationError(order, _) if order == event.submitted.order => None
       case OrderValidationError(order, _) if order == event.counter.order   => cancelCounterOrder()
@@ -224,10 +221,7 @@ class OrderBookActor(parent: ActorRef,
         (None, None)
 
       case event @ Events.OrderExecuted(o, c) =>
-        (for {
-          tx <- createTransaction(event)
-          _  <- utx.putIfNew(tx)
-        } yield tx) match {
+        createTransaction(event) match {
           case Right(tx) =>
             refreshMarketStatus(Some(o.order))
             allChannels.broadcastTx(tx)
@@ -312,14 +306,12 @@ object OrderBookActor {
             assetPair: AssetPair,
             updateSnapshot: OrderBook => Unit,
             updateMarketStatus: MarketStatus => Unit,
-            utx: UtxPool,
             allChannels: ChannelGroup,
             settings: MatcherSettings,
             requestResolver: RequestResolver,
             createTransaction: OrderExecuted => Either[ValidationError, ExchangeTransaction],
             time: Time = NTP): Props =
-    Props(
-      new OrderBookActor(parent, assetPair, updateSnapshot, updateMarketStatus, utx, allChannels, settings, requestResolver, createTransaction, time))
+    Props(new OrderBookActor(parent, assetPair, updateSnapshot, updateMarketStatus, allChannels, settings, requestResolver, createTransaction, time))
 
   def name(assetPair: AssetPair): String = assetPair.toString
 

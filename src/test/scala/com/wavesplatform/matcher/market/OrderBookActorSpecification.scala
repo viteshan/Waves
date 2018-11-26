@@ -13,11 +13,10 @@ import com.wavesplatform.matcher.market.OrderBookActor._
 import com.wavesplatform.matcher.model._
 import com.wavesplatform.matcher.{Matcher, MatcherTestData}
 import com.wavesplatform.settings.Constants
-import com.wavesplatform.state.{ByteStr, Diff}
+import com.wavesplatform.state.{ByteStr, EitherExt2}
 import com.wavesplatform.transaction._
-import com.wavesplatform.transaction.assets.exchange.{AssetPair, ExchangeTransaction, Order}
+import com.wavesplatform.transaction.assets.exchange.{AssetPair, Order}
 import com.wavesplatform.utils.EmptyBlockchain
-import com.wavesplatform.utx.UtxPool
 import io.netty.channel.group.ChannelGroup
 import org.scalamock.scalatest.PathMockFactory
 
@@ -45,8 +44,6 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
 
     val pair = AssetPair(Some(b), None)
 
-    val utx = stub[UtxPool]
-    (utx.putIfNew _).when(*).onCall((_: Transaction) => Right((true, Diff.empty)))
     val allChannels = stub[ChannelGroup]
     val actor = system.actorOf(
       Props(
@@ -54,7 +51,6 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
                            pair,
                            update(pair),
                            p => Option(md.get(p)),
-                           utx,
                            allChannels,
                            matcherSettings,
                            akkaRequestResolver(ActorRef.noSender),
@@ -261,26 +257,23 @@ class OrderBookActorSpecification extends MatcherSpec("OrderBookActor") with NTP
       val invalidOrd = buy(pair, 1000 * Order.PriceConstant, 5000)
       val ord2       = sell(pair, 10 * Order.PriceConstant, 100)
 
-      val pool = stub[UtxPool]
-      (pool.putIfNew _).when(*).onCall { tx: Transaction =>
-        tx match {
-          case om: ExchangeTransaction if om.buyOrder == invalidOrd => Left(ValidationError.GenericError("test"))
-          case _: Transaction                                       => Right((true, Diff.empty))
-        }
-      }
       val allChannels = stub[ChannelGroup]
       val actor = system.actorOf(
-        Props(
-          new OrderBookActor(TestProbe().ref,
-                             pair,
-                             update(pair),
-                             m => md.put(pair, m),
-                             pool,
-                             allChannels,
-                             matcherSettings,
-                             akkaRequestResolver(ActorRef.noSender),
-                             txFactory,
-                             ntpTime) with RestartableActor))
+        Props(new OrderBookActor(
+          TestProbe().ref,
+          pair,
+          update(pair),
+          m => md.put(pair, m),
+          allChannels,
+          matcherSettings,
+          akkaRequestResolver(ActorRef.noSender),
+          event => {
+            if (event.submitted.order == invalidOrd || event.counter.order == invalidOrd)
+              Left(ValidationError.OrderValidationError(invalidOrd, "It's an invalid!"))
+            else Right(txFactory(event).explicitGet())
+          },
+          ntpTime
+        ) with RestartableActor))
 
       actor ! Matcher.wrap(ord1)
       expectMsg(OrderAccepted(ord1))
