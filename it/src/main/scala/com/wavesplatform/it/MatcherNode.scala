@@ -4,6 +4,7 @@ import com.wavesplatform.account.PrivateKeyAccount
 import com.wavesplatform.it.api.SyncHttpApi._
 import com.wavesplatform.it.api.TransactionInfo
 import com.wavesplatform.it.util._
+import com.wavesplatform.state.EitherExt2
 import com.wavesplatform.transaction.smart.SetScriptTransaction
 import com.wavesplatform.transaction.smart.script.ScriptCompiler
 import com.wavesplatform.utils.ScorexLogging
@@ -44,14 +45,13 @@ trait MatcherNode extends BeforeAndAfterAll with Nodes with ScorexLogging {
       val pk     = PrivateKeyAccount.fromSeed(nodes(i).seed(addresses(i))).right.get
       val setScriptTransaction = SetScriptTransaction
         .selfSigned(SetScriptTransaction.supportedVersions.head, pk, Some(script), 0.01.waves, System.currentTimeMillis())
-        .right
-        .get
+        .explicitGet()
 
       val setScriptId = matcherNode
         .signedBroadcast(setScriptTransaction.json() + ("type" -> JsNumber(SetScriptTransaction.typeId.toInt)))
         .id
 
-      matcherNode.waitForTransaction(setScriptId)
+      nodes.waitForTransaction(setScriptId)
     }
   }
 
@@ -62,13 +62,12 @@ trait MatcherNode extends BeforeAndAfterAll with Nodes with ScorexLogging {
     }
     val setScriptTransaction = SetScriptTransaction
       .selfSigned(SetScriptTransaction.supportedVersions.head, acc, script, 0.014.waves, System.currentTimeMillis())
-      .right
-      .get
+      .explicitGet()
 
     val setScriptId = matcherNode
       .signedBroadcast(setScriptTransaction.json() + ("type" -> JsNumber(SetScriptTransaction.typeId.toInt)))
       .id
 
-    matcherNode.waitForTransaction(setScriptId)
+    nodes.waitForTransaction(setScriptId)
   }
 }

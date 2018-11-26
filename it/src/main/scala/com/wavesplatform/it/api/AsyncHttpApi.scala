@@ -25,6 +25,7 @@ import org.scalactic.source.Position
 import org.scalatest.{Assertions, Matchers}
 import play.api.libs.json.Json.{stringify, toJson}
 import play.api.libs.json._
+
 import scala.compat.java8.FutureConverters._
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
@@ -55,7 +56,7 @@ object AsyncHttpApi extends Assertions {
         .build()
     }
 
-    def postJsObjectWithApiKey(path: String, body: JsObject): Future[Response] = retrying {
+    def postJsObjectWithApiKey(path: String, body: JsValue): Future[Response] = retrying {
       _post(s"${n.nodeApiEndpoint}$path")
         .withApiKey(n.apiKey)
         .setHeader("Content-type", "application/json")
@@ -334,13 +335,21 @@ object AsyncHttpApi extends Assertions {
 
     def broadcastRequest[A: Writes](req: A): Future[Transaction] = postJson("/transactions/broadcast", req).as[Transaction]
 
-    def sign(jsobj: JsObject): Future[JsObject] =
-      postJsObjectWithApiKey("/transactions/sign", jsobj).as[JsObject]
+    def sign(json: JsValue): Future[JsObject] =
+      postJsObjectWithApiKey("/transactions/sign", json).as[JsObject]
 
-    def signedBroadcast(jsobj: JsObject): Future[Transaction] =
-      post("/transactions/broadcast", stringify(jsobj)).as[Transaction]
+    def expectSignedBroadcastRejected(json: JsValue): Future[Int] = {
+      post("/transactions/broadcast", stringify(json)).transform {
+        case Failure(UnexpectedStatusCodeException(_, _, 400, body)) => Success((Json.parse(body) \ "error").as[Int])
+        case Failure(cause)                                          => Failure(cause)
+        case Success(resp)                                           => Failure(UnexpectedStatusCodeException("POST", "/transactions/broadcast", resp.getStatusCode, resp.getResponseBody))
+      }
+    }
 
-    def signAndBroadcast(jsobj: JsObject): Future[Transaction] = sign(jsobj).flatMap(signedBroadcast)
+    def signedBroadcast(json: JsValue): Future[Transaction] =
+      post("/transactions/broadcast", stringify(json)).as[Transaction]
+
+    def signAndBroadcast(json: JsValue): Future[Transaction] = sign(json).flatMap(signedBroadcast)
 
     def signedIssue(issue: SignedIssueV1Request): Future[Transaction] =
       postJson("/assets/broadcast/issue", issue).as[Transaction]
@@ -498,7 +507,7 @@ object AsyncHttpApi extends Assertions {
           .toCompletableFuture
           .toScala
           .recoverWith {
-            case e: UnexpectedStatusCodeException if waitForStatus =>
+            case e: UnexpectedStatusCodeException if e.statusCode == 503 || waitForStatus =>
               n.log.debug(s"Failed to execute request '$r' with error: ${e.getMessage}")
               timer.schedule(executeRequest, interval)
             case e @ (_: IOException | _: TimeoutException) =>
@@ -560,8 +569,8 @@ object AsyncHttpApi extends Assertions {
       n.assetBalance(acc, assetIdString).map(_.balance shouldBe balance)
     }
 
-    def calculateFee(jsobj: JsObject): Future[FeeInfo] =
-      postJsObjectWithApiKey("/transactions/calculateFee", jsobj).as[FeeInfo]
+    def calculateFee(json: JsValue): Future[FeeInfo] =
+      postJsObjectWithApiKey("/transactions/calculateFee", json).as[FeeInfo]
 
   }
 
@@ -575,14 +584,14 @@ object AsyncHttpApi extends Assertions {
         finalHeights <- traverse(nodes)(_.waitForTransaction(transactionId).map(_.height))
       } yield all(finalHeights) should be >= (finalHeights.head)
 
-    def waitForTransaction(transactionId: String)(implicit p: Position): Future[Unit] =
-      traverse(nodes)(_.waitForTransaction(transactionId)).map(_ => ())
+    def waitForTransaction(transactionId: String)(implicit p: Position): Future[TransactionInfo] =
+      traverse(nodes)(_.waitForTransaction(transactionId)).map(_.head)
 
     def waitForHeightArise(): Future[Int] =
       for {
         height <- height.map(_.max)
         _      <- traverse(nodes)(_.waitForHeight(height + 1))
-      } yield (height + 1)
+      } yield height + 1
 
     def waitForSameBlockHeadesAt(height: Int, retryInterval: FiniteDuration = 5.seconds): Future[Boolean] = {
 

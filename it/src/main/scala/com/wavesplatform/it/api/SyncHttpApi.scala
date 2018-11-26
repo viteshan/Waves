@@ -176,8 +176,8 @@ object SyncHttpApi extends Assertions {
     def cancelSponsorship(sourceAddress: String, assetId: String, fee: Long): Transaction =
       sync(async(n).cancelSponsorship(sourceAddress, assetId, fee))
 
-    def sign(jsObject: JsObject): JsObject =
-      sync(async(n).sign(jsObject))
+    def sign(json: JsValue): JsObject =
+      sync(async(n).sign(json))
 
     def createAlias(targetAddress: String, alias: String, fee: Long): Transaction =
       sync(async(n).createAlias(targetAddress, alias, fee))
@@ -225,7 +225,9 @@ object SyncHttpApi extends Assertions {
     def cancelLease(sourceAddress: String, leaseId: String, fee: Long, version: Byte = 1): Transaction =
       sync(async(n).cancelLease(sourceAddress, leaseId, fee))
 
-    def signedBroadcast(tx: JsObject, waitForTx: Boolean = false): Transaction = {
+    def expectSignedBroadcastRejected(json: JsValue): Int = sync(async(n).expectSignedBroadcastRejected(json))
+
+    def signedBroadcast(tx: JsValue, waitForTx: Boolean = false): Transaction = {
       maybeWaitForTransaction(sync(async(n).signedBroadcast(tx)), waitForTx)
     }
 
@@ -247,7 +249,7 @@ object SyncHttpApi extends Assertions {
     def waitForTransaction(txId: String, retryInterval: FiniteDuration = 1.second): TransactionInfo =
       sync(async(n).waitForTransaction(txId))
 
-    def signAndBroadcast(tx: JsObject, waitForTx: Boolean = false): Transaction = {
+    def signAndBroadcast(tx: JsValue, waitForTx: Boolean = false): Transaction = {
       maybeWaitForTransaction(sync(async(n).signAndBroadcast(tx)), waitForTx)
     }
 
@@ -311,7 +313,7 @@ object SyncHttpApi extends Assertions {
     def waitForHeightAriseAndTxPresent(transactionId: String)(implicit pos: Position): Unit =
       sync(async(nodes).waitForHeightAriseAndTxPresent(transactionId), TxInBlockchainAwaitTime)
 
-    def waitForTransaction(transactionId: String)(implicit pos: Position): Unit =
+    def waitForTransaction(transactionId: String)(implicit pos: Position): TransactionInfo =
       sync(async(nodes).waitForTransaction(transactionId), TxInBlockchainAwaitTime)
 
     def waitForHeightArise(): Int =

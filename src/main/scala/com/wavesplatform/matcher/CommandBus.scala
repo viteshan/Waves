@@ -11,9 +11,7 @@ class CommandBus {
   private val requests = new ConcurrentHashMap[RequestId, Promise[MatcherResponse]]()
 
   def sendRequest(matcher: ActorRef)(payload: Any): Future[MatcherResponse] = {
-    val request = Matcher.wrap(payload)
-    matcher ! request
-
+    val request    = Matcher.wrap(payload)
     val newPromise = Promise[MatcherResponse]()
     val p          = Option(requests.putIfAbsent(request.id, newPromise)).getOrElse(newPromise)
 
@@ -23,6 +21,7 @@ class CommandBus {
     //      Option(requests.remove(id)).foreach(_.trySuccess(OperationTimedOut))
     //    }
 
+    matcher ! request
     p.future
   }
 
