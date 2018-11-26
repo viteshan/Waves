@@ -1,30 +1,23 @@
 package com.wavesplatform.matcher.api
 
-import java.util.concurrent.Executors
-
 import akka.actor.ActorRef
-import akka.http.scaladsl.marshalling.ToResponseMarshallable
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.{Directive1, Route}
 import akka.pattern.ask
 import akka.util.Timeout
 import com.google.common.primitives.Longs
-import com.wavesplatform.account.PublicKeyAccount
+import com.wavesplatform.account.{Address, PublicKeyAccount}
 import com.wavesplatform.api.http._
 import com.wavesplatform.crypto
-import com.wavesplatform.matcher.AssetPairBuilder
 import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData}
 import com.wavesplatform.matcher.market.OrderBookActor._
-import com.wavesplatform.matcher.market.OrderHistoryActor
 import com.wavesplatform.matcher.model._
+import com.wavesplatform.matcher.{AddressActor, AddressDirectory, AssetPairBuilder}
 import com.wavesplatform.metrics.TimerExt
 import com.wavesplatform.settings.WavesSettings
-import com.wavesplatform.state.ByteStr
-import com.wavesplatform.transaction.AssetAcc
 import com.wavesplatform.transaction.assets.exchange.OrderJson._
 import com.wavesplatform.transaction.assets.exchange.{AssetPair, Order}
 import com.wavesplatform.utils.{Base58, NTP, ScorexLogging, Time}
-import io.netty.util.concurrent.DefaultThreadFactory
 import io.swagger.annotations._
 import javax.ws.rs.Path
 import kamon.Kamon
@@ -32,17 +25,17 @@ import org.iq80.leveldb.DB
 import play.api.libs.json._
 
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 @Path("/matcher")
 @Api(value = "/matcher/")
 case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
-                           orderValidator: OrderValidator,
+                           matcherPublicKey: PublicKeyAccount,
                            matcher: ActorRef,
-                           orderHistory: ActorRef,
                            orderBook: AssetPair => Option[Either[Unit, ActorRef]],
+                           addressActor: ActorRef,
                            getMarketStatus: AssetPair => Option[MarketStatus],
                            orderBookSnapshot: OrderBookSnapshotHttpCache,
                            wavesSettings: WavesSettings,
@@ -62,13 +55,11 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
   private val cancelTimer     = timer.refine("action" -> "cancel")
   private val openVolumeTimer = timer.refine("action" -> "open-volume")
 
-  private val batchCancelExecutor = ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor(new DefaultThreadFactory("batch-cancel", true)))
-
   override lazy val route: Route =
     pathPrefix("matcher") {
-      matcherPublicKey ~ getOrderBook ~ marketStatus ~ place ~ getAssetPairAndPublicKeyOrderHistory ~ getPublicKeyOrderHistory ~
+      getMatcherPublicKey ~ getOrderBook ~ marketStatus ~ place ~ getAssetPairAndPublicKeyOrderHistory ~ getPublicKeyOrderHistory ~
         getAllOrderHistory ~ getTradableBalance ~ reservedBalance ~ orderStatus ~
-        historyDelete ~ cancel ~ cancelAll ~ orderbooks ~ orderBookDelete ~ getTransactionsByOrder ~ forceCancelOrder ~
+        historyDelete ~ cancel ~ cancelAll ~ orderbooks ~ orderBookDelete ~ getTransactionsByOrder ~
         getSettings
     }
 
@@ -85,10 +76,20 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
       case Left(e) => complete(StatusCodes.NotFound -> Json.obj("message" -> e))
     }
 
+  private def withCancelRequest(f: CancelOrderRequest => Route): Route =
+    post {
+      entity(as[CancelOrderRequest]) { req =>
+        if (req.isSignatureValid()) f(req) else complete(InvalidSignature)
+      } ~ complete(StatusCodes.BadRequest)
+    } ~ complete(StatusCodes.MethodNotAllowed)
+
+  private def askAddressActor(sender: Address, msg: AddressActor.Command): Future[MatcherResponse] =
+    (addressActor ? AddressDirectory.Envelope(sender, msg)).mapTo[MatcherResponse]
+
   @Path("/")
   @ApiOperation(value = "Matcher Public Key", notes = "Get matcher public key", httpMethod = "GET")
-  def matcherPublicKey: Route = (pathEndOrSingleSlash & get) {
-    complete(JsString(Base58.encode(orderValidator.matcherPublicKey.publicKey)))
+  def getMatcherPublicKey: Route = (pathEndOrSingleSlash & get) {
+    complete(JsString(Base58.encode(matcherPublicKey.publicKey)))
   }
 
   @Path("/settings")
@@ -156,78 +157,22 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
         dataType = "com.wavesplatform.transaction.assets.exchange.Order"
       )
     ))
-  def place: Route = path("orderbook") {
-    (pathEndOrSingleSlash & post) {
-      json[Order] { order =>
-        placeTimer.measureFuture {
-          orderValidator.validateNewOrder(order) match {
-            case Left(e)  => Future.successful[MatcherResponse](OrderRejected(e))
-            case Right(_) => (matcher ? order).mapTo[MatcherResponse]
-          }
-        }
+  def place: Route = (path("orderbook") & pathEndOrSingleSlash) {
+    post {
+      entity(as[Order]) { order =>
+        complete(placeTimer.measureFuture(askAddressActor(order.sender, AddressActor.PlaceOrder(order))))
       }
+    } ~ complete(StatusCodes.MethodNotAllowed)
+  }
+
+  private def handleCancelRequest(assetPair: Option[AssetPair]): Route = {
+    withCancelRequest { req =>
+      complete((req.timestamp, req.orderId) match {
+        case (Some(ts), None)      => askAddressActor(req.sender, AddressActor.CancelAllOrders(assetPair, ts))
+        case (None, Some(orderId)) => askAddressActor(req.sender, AddressActor.CancelOrder(orderId))
+        case _                     => OrderCancelRejected("Either timestamp or orderId must be specified")
+      })
     }
-  }
-
-  private def doCancel(order: Order): Future[MatcherResponse] = orderBook(order.assetPair) match {
-    case Some(Right(orderBookRef)) =>
-      log.trace(s"Canceling ${order.id()} for ${order.sender.address}")
-      (orderBookRef ? CancelOrder(order.id())).mapTo[MatcherResponse].map {
-        case _: OrderCancelRejected =>
-          orderHistory ! Events.OrderCanceled(LimitOrder(order), unmatchable = false)
-          OrderCanceled(order.id())
-        case x => x
-      }
-    case Some(Left(_)) => Future.successful(OrderBookUnavailable)
-    case None =>
-      log.debug(s"Order book for ${order.assetPair} was not found, canceling ${order.id()} anyway")
-      (orderHistory ? OrderHistoryActor.ForceCancelOrderFromHistory(order.id()))
-        .map {
-          case Some(_) => OrderCanceled(order.id())
-          case None    => OrderCancelRejected(s"Order ${order.id()} not found")
-        }
-  }
-
-  private def cancelOrder(orderId: ByteStr, senderPublicKey: Option[PublicKeyAccount], force: Boolean = false): ToResponseMarshallable = {
-    val st = cancelTimer.start()
-    DBUtils.orderInfo(db, orderId).status match {
-      case LimitOrder.NotFound                => StatusCodes.NotFound   -> LimitOrder.NotFound.json
-      case status if status.isFinal && !force => StatusCodes.BadRequest -> Json.obj("message" -> s"Order is already ${status.name}")
-      case _ =>
-        DBUtils.order(db, orderId) match {
-          case None =>
-            StatusCodes.NotFound -> Json.obj(
-              "status"  -> "NotFound",
-              "message" -> "The order is not found"
-            )
-          case Some(order) if senderPublicKey.exists(_ != order.senderPublicKey) =>
-            OrderCancelRejected("Public key mismatch")
-          case Some(order) =>
-            doCancel(order).andThen { case _ => st.stop() }
-        }
-    }
-  }
-
-  private def batchCancel(senderPublicKey: PublicKeyAccount, assetPair: Option[AssetPair], requestTimestamp: Long): Future[ToResponseMarshallable] = {
-    (orderHistory ? BatchCancel(senderPublicKey, assetPair, requestTimestamp))
-      .mapTo[Either[String, Long]]
-      .flatMap {
-        case Left(e) => Future.successful[ToResponseMarshallable](OrderCancelRejected(e))
-        case Right(_) =>
-          val ordersToCancel = assetPair match {
-            case Some(p) => DBUtils.ordersByAddressAndPair(db, senderPublicKey, p, true, DBUtils.indexes.active.MaxElements)
-            case None    => DBUtils.ordersByAddress(db, senderPublicKey, true, DBUtils.indexes.active.MaxElements)
-          }
-
-          ordersToCancel
-            .foldLeft(Future.successful(Json.arr())) {
-              case (f, (order, _)) =>
-                f.zipWith(doCancel(order)) { (r, mr) =>
-                  r :+ mr.json
-                }(batchCancelExecutor)
-            }
-            .map(arr => StatusCodes.OK -> Json.obj("status" -> "BatchCancelCompleted", "message" -> arr))
-      }
   }
 
   @Path("/orderbook/{amountAsset}/{priceAsset}/cancel")
@@ -250,20 +195,9 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
         dataType = "com.wavesplatform.matcher.api.CancelOrderRequest"
       )
     ))
-  def cancel: Route = (path("orderbook" / AssetPairPM / "cancel") & post) { p =>
+  def cancel: Route = path("orderbook" / AssetPairPM / "cancel") { p =>
     withAssetPair(p) { pair =>
-      orderBook(pair).fold[Route](complete(StatusCodes.NotFound -> Json.obj("message" -> "Invalid asset pair"))) { _ =>
-        json[CancelOrderRequest] { req =>
-          if (req.isSignatureValid()) (req.orderId, req.timestamp) match {
-            case (Some(id), None) => cancelOrder(id, Some(req.sender))
-            case (None, Some(reqTimestamp)) =>
-              batchCancel(req.sender, Some(pair), reqTimestamp).andThen {
-                case Failure(exception) => log.debug(s"Error validating batch cancel request from ${req.sender.toAddress} for $pair", exception)
-              }
-            case _ => StatusCodes.BadRequest -> "Either timestamp or orderId must be provided"
-          } else InvalidSignature
-        }
-      }
+      handleCancelRequest(Some(pair))
     }
   }
 
@@ -284,13 +218,8 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
         dataType = "com.wavesplatform.matcher.api.CancelOrderRequest"
       )
     ))
-  def cancelAll: Route = (path("orderbook" / "cancel") & post) {
-    json[CancelOrderRequest] { req =>
-      if (req.isSignatureValid())
-        req.timestamp.fold[Future[ToResponseMarshallable]](Future.successful(OrderCancelRejected("Timestamp must be specified"))) { reqTimestamp =>
-          batchCancel(req.sender, None, reqTimestamp)
-        } else InvalidSignature
-    }
+  def cancelAll: Route = path("orderbook" / "cancel") {
+    handleCancelRequest(None)
   }
 
   @Path("/orderbook/{amountAsset}/{priceAsset}/delete")
@@ -412,16 +341,6 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
     pk
   }
 
-  @Path("/orders/cancel/{orderId}")
-  @ApiOperation(value = "Cancel Order by ID without signature", notes = "Cancel Order by ID without signature", httpMethod = "POST")
-  @ApiImplicitParams(
-    Array(
-      new ApiImplicitParam(name = "orderId", value = "Order Id", required = true, dataType = "string", paramType = "path")
-    ))
-  def forceCancelOrder: Route = (path("orders" / "cancel" / ByteStrPM) & post & withAuth) { orderId =>
-    complete(cancelOrder(orderId, None, force = true))
-  }
-
   @Path("/orders/{address}")
   @ApiOperation(value = "All Order History by address", notes = "Get All Order History for a given address", httpMethod = "GET")
   @ApiImplicitParams(
@@ -455,11 +374,7 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
     ))
   def getTradableBalance: Route = (path("orderbook" / AssetPairPM / "tradableBalance" / AddressPM) & get) { (pair, address) =>
     withAssetPair(pair, redirectToInverse = true, s"/tradableBalance/$address") { pair =>
-      complete(
-        StatusCodes.OK -> Json.obj(
-          pair.amountAssetStr -> orderValidator.tradableBalance(AssetAcc(address, pair.amountAsset)),
-          pair.priceAssetStr  -> orderValidator.tradableBalance(AssetAcc(address, pair.priceAsset))
-        ))
+      complete(askAddressActor(address, AddressActor.GetTradableBalance(pair)))
     }
   }
 
@@ -508,7 +423,7 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
     (pathEndOrSingleSlash & get) {
       complete((matcher ? GetMarkets).mapTo[Seq[MarketData]].map { markets =>
         StatusCodes.OK -> Json.obj(
-          "matcherPublicKey" -> Base58.encode(orderValidator.matcherPublicKey.publicKey),
+          "matcherPublicKey" -> Base58.encode(matcherPublicKey.publicKey),
           "markets" -> JsArray(markets.map(m =>
             Json.obj(
               "amountAsset"     -> m.pair.amountAssetStr,

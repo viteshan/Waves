@@ -26,7 +26,7 @@ class ExchangeTransactionCreator(blockchain: Blockchain, matcherPrivateKey: Priv
     val (buy, sell)       = Order.splitByType(submitted.order, counter.order)
     val (buyFee, sellFee) = calculateMatcherFee(buy, sell, event.executedAmount)
 
-    val txFee = getMinFee(blockchain, settings.orderMatchTxFee, matcherPrivateKey, Some(buy.sender), Some(sell.sender), counter.order.assetPair)
+    val txFee = minFee(blockchain, settings.orderMatchTxFee, matcherPrivateKey, Some(buy.sender), Some(sell.sender), counter.order.assetPair)
     ExchangeTransactionV2.create(matcherPrivateKey, buy, sell, event.executedAmount, price, buyFee, sellFee, txFee, time.getTimestamp())
   }
 }
@@ -34,14 +34,14 @@ class ExchangeTransactionCreator(blockchain: Blockchain, matcherPrivateKey: Priv
 object ExchangeTransactionCreator {
 
   /**
-    * @note see Verifier.verifyExchange
+    * @see [[com.wavesplatform.transaction.smart.Verifier#verifyExchange verifyExchange]]
     */
-  def getMinFee(blockchain: Blockchain,
-                orderMatchTxFee: Long,
-                matcherAddress: Address,
-                order1Sender: Option[Address],
-                order2Sender: Option[Address],
-                assetPair: AssetPair): Long = {
+  def minFee(blockchain: Blockchain,
+             orderMatchTxFee: Long,
+             matcherAddress: Address,
+             order1Sender: Option[Address],
+             order2Sender: Option[Address],
+             assetPair: AssetPair): Long = {
     def assetFee(assetId: AssetId): Long   = if (blockchain.hasAssetScript(assetId)) CommonValidation.ScriptExtraFee else 0L
     def accountFee(address: Address): Long = if (blockchain.hasScript(address)) CommonValidation.ScriptExtraFee else 0L
 

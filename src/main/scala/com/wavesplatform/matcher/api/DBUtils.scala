@@ -108,12 +108,4 @@ object DBUtils {
       tx <- ro.get(MatcherKeys.exchangeTransaction(txId))
     } yield tx
   }
-
-  def openVolume(db: DB, address: Address, assetId: Option[AssetId]): Long = db.get(MatcherKeys.openVolume(address, assetId)).getOrElse(0L)
-  def activeOrderCount(db: DB, address: Address): Int = {
-    val key = MatcherKeys.activeOrdersSize(address)
-    key.parse(db.get(key.keyBytes)).getOrElse(0)
-  }
-
-  def lastOrderTimestamp(db: DB, address: Address): Option[Long] = db.get(MatcherKeys.lastCommandTimestamp(address))
 }
