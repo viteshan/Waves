@@ -5,7 +5,6 @@ import java.util.concurrent.ScheduledFuture
 import akka.http.scaladsl.model.{ContentTypes, HttpEntity, HttpResponse}
 import com.google.common.cache.{CacheBuilder, CacheLoader}
 import com.wavesplatform.matcher.api.OrderBookSnapshotHttpCache.Settings
-import com.wavesplatform.matcher.market.OrderBookActor.GetOrderBookResponse
 import com.wavesplatform.matcher.model.MatcherModel.{Level, Price}
 import com.wavesplatform.matcher.model.{LevelAgg, LimitOrder, OrderBook, OrderBookResult}
 import com.wavesplatform.transaction.assets.exchange.AssetPair
@@ -28,18 +27,16 @@ class OrderBookSnapshotHttpCache(settings: Settings, orderBookSnapshot: AssetPai
         def aggregateLevel(l: (Price, Level[LimitOrder])) = LevelAgg(l._2.foldLeft(0L)((b, o) => b + o.amount), l._1)
 
         val orderBook = orderBookSnapshot(key.pair).getOrElse(OrderBook.empty)
-        val preparedResponse = GetOrderBookResponse(
+        val entity = OrderBookResult(
           NTP.correctedTime(),
           key.pair,
           orderBook.bids.view.take(key.depth).map(aggregateLevel).toSeq,
           orderBook.asks.view.take(key.depth).map(aggregateLevel).toSeq
         )
-
-        import preparedResponse._
         HttpResponse(
           entity = HttpEntity(
             ContentTypes.`application/json`,
-            JsonSerializer.serialize(OrderBookResult(ts, assetPair, bids, asks))
+            OrderBookResult.toJson(entity)
           )
         )
       }

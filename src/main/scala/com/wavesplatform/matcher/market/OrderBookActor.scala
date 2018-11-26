@@ -3,7 +3,6 @@ package com.wavesplatform.matcher.market
 import java.util.UUID
 
 import akka.actor.{ActorRef, Props}
-import akka.http.scaladsl.model._
 import akka.persistence._
 import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
 import com.wavesplatform.matcher._
@@ -76,7 +75,7 @@ class OrderBookActor(parent: ActorRef,
             .foreach(x => context.system.eventStream.publish(Events.OrderCanceled(x, unmatchable = false)))
           deleteMessages(lastSequenceNr)
           deleteSnapshots(SnapshotSelectionCriteria.Latest)
-          resolveRequest(requestId, GetOrderBookResponse(time.correctedTime(), assetPair, Seq(), Seq()))
+          resolveRequest(requestId, GetOrderBookResponse(OrderBookResult(time.correctedTime(), assetPair, Seq(), Seq())))
           context.stop(self)
       }
 
@@ -333,14 +332,6 @@ object OrderBookActor {
   case class CancelOrder(assetPair: AssetPair, orderId: ByteStr) extends HasAssetPair
 
   case object OrderCleanup
-
-  case class GetOrderBookResponse(ts: Long, assetPair: AssetPair, bids: Seq[LevelAgg], asks: Seq[LevelAgg])
-      extends MatcherResponse(StatusCodes.OK, JsonSerializer.serialize(OrderBookResult(ts, assetPair, bids, asks)))
-      with HasAssetPair
-
-  object GetOrderBookResponse {
-    def empty(pair: AssetPair): GetOrderBookResponse = GetOrderBookResponse(System.currentTimeMillis(), pair, Seq(), Seq())
-  }
 
   case class MarketStatus(assetPair: AssetPair, bid: Option[(Price, Level[LimitOrder])], ask: Option[(Price, Level[LimitOrder])], last: Option[Order])
       extends HasAssetPair

@@ -184,14 +184,17 @@ case class MatcherApiRoute(assetPairBuilder: AssetPairBuilder,
     }
   }
 
-  private def doCancel(order: Order): Future[MatcherResponse] = orderBook(order.assetPair) match {
+  private def doCancel(order: Order): Future[WrappedMatcherResponse] = orderBook(order.assetPair) match {
     case Some(Right(_)) =>
       log.trace(s"Canceling ${order.id()} for ${order.sender.address}")
-      sendRequest(CancelOrder(order.assetPair, order.id())).map {
+      sendRequest(CancelOrder(order.assetPair, order.id())).flatMap {
         case _: OrderCancelRejected =>
           orderHistory ! Events.OrderCanceled(LimitOrder(order), unmatchable = false)
-          OrderCanceled(order.id())
-        case x => x
+          Future.successful(OrderCanceled(order.id()))
+        case x: OrderCanceled => Future.successful(x)
+        case x =>
+          log.warn(s"Unexpected response for cancel: $x")
+          Future.failed(new RuntimeException("Unexpected response"))
       }
     case Some(Left(_)) => Future.successful(OrderBookUnavailable)
     case None =>

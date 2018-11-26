@@ -152,17 +152,17 @@ object AsyncHttpApi extends Assertions {
       get(s"/addresses/scriptInfo/$address").as[AddressApiRoute.AddressScriptInfo]
 
     def findTransactionInfo(txId: String): Future[Option[TransactionInfo]] = transactionInfo(txId).transform {
-      case Success(tx)                                       => Success(Some(tx))
-      case Failure(UnexpectedStatusCodeException(_, 404, _)) => Success(None)
-      case Failure(ex)                                       => Failure(ex)
+      case Success(tx)                                          => Success(Some(tx))
+      case Failure(UnexpectedStatusCodeException(_, _, 404, _)) => Success(None)
+      case Failure(ex)                                          => Failure(ex)
     }
 
     def waitForTransaction(txId: String, retryInterval: FiniteDuration = 1.second): Future[TransactionInfo] = {
       val condition = waitFor[Option[TransactionInfo]](s"transaction $txId")(
         _.transactionInfo(txId).transform {
-          case Success(tx)                                       => Success(Some(tx))
-          case Failure(UnexpectedStatusCodeException(_, 404, _)) => Success(None)
-          case Failure(ex)                                       => Failure(ex)
+          case Success(tx)                                          => Success(Some(tx))
+          case Failure(UnexpectedStatusCodeException(_, _, 404, _)) => Success(None)
+          case Failure(ex)                                          => Failure(ex)
         },
         tOpt => tOpt.exists(_.id == txId),
         retryInterval
@@ -486,11 +486,11 @@ object AsyncHttpApi extends Assertions {
             new AsyncCompletionHandler[Response] {
               override def onCompleted(response: Response): Response = {
                 if (response.getStatusCode == statusCode) {
-                  n.log.debug(s"Request: ${r.getUrl}\nResponse: ${response.getResponseBody}")
+                  n.log.debug(s"Request: ${r.getMethod} ${r.getUrl}\nResponse: ${response.getResponseBody}")
                   response
                 } else {
-                  n.log.debug(s"Request: ${r.getUrl}\nUnexpected status code(${response.getStatusCode}): ${response.getResponseBody}")
-                  throw UnexpectedStatusCodeException(r.getUrl, response.getStatusCode, response.getResponseBody)
+                  n.log.debug(s"Request: ${r.getMethod} ${r.getUrl}\nUnexpected status code(${response.getStatusCode}): ${response.getResponseBody}")
+                  throw UnexpectedStatusCodeException(r.getMethod, r.getUrl, response.getStatusCode, response.getResponseBody)
                 }
               }
             }

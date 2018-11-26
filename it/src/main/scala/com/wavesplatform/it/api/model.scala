@@ -8,8 +8,8 @@ import scala.util.{Failure, Success}
 
 // USCE no longer contains references to non-serializable Request/Response objects
 // to work around https://github.com/scalatest/scalatest/issues/556
-case class UnexpectedStatusCodeException(requestUrl: String, statusCode: Int, responseBody: String)
-    extends Exception(s"Request: $requestUrl; Unexpected status code ($statusCode): $responseBody")
+case class UnexpectedStatusCodeException(requestMethod: String, requestUrl: String, statusCode: Int, responseBody: String)
+    extends Exception(s"Request: $requestMethod $requestUrl; Unexpected status code ($statusCode): $responseBody")
 
 case class Status(blockchainHeight: Int, stateHeight: Int, updatedTimestamp: Long, updatedDate: String)
 object Status {
