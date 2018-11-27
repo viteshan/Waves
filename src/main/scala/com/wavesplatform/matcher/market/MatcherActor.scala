@@ -239,14 +239,16 @@ object MatcherActor {
         orderBooks,
         (assetPair, matcher) =>
           OrderBookActor
-            .props(matcher,
-                   assetPair,
-                   updateSnapshot(assetPair),
-                   updateMarketStatus(assetPair),
-                   allChannels,
-                   settings,
-                   requestResolver,
-                   createTransaction),
+            .props(
+              matcher,
+              assetPair,
+              updateSnapshot(assetPair),
+              updateMarketStatus(assetPair),
+              allChannels,
+              settings,
+              requestResolver,
+              createTransaction
+          ),
         assetDescription
       ))
 
@@ -265,7 +267,7 @@ object MatcherActor {
     def tryComplete(): Unit  = if (isCompleted) onComplete()
   }
 
-  case class Request[T](id: RequestId, payload: T)
+  case class Request[T](seqNr: RequestId, payload: T)
 
   case object SaveSnapshot
 

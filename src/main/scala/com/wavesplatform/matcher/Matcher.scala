@@ -1,7 +1,6 @@
 package com.wavesplatform.matcher
 
 import java.io.File
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
@@ -14,7 +13,6 @@ import com.wavesplatform.account.{Address, PrivateKeyAccount}
 import com.wavesplatform.api.http.CompositeHttpService
 import com.wavesplatform.db._
 import com.wavesplatform.matcher.api.{MatcherApiRoute, MatcherResponse, OrderBookSnapshotHttpCache}
-import com.wavesplatform.matcher.market.MatcherActor.Request
 import com.wavesplatform.matcher.market.OrderBookActor.MarketStatus
 import com.wavesplatform.matcher.market.{MatcherActor, MatcherTransactionWriter, OrderHistoryActor}
 import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook, OrderValidator}
@@ -68,7 +66,7 @@ class Matcher(actorSystem: ActorSystem,
     orderBooksSnapshotCache.invalidate(assetPair)
   }
 
-  private val commandBus = new CommandBus
+  private val commandBus = new CommandBus.Local
 
   lazy val matcherApiRoutes = Seq(
     MatcherApiRoute(
@@ -155,11 +153,9 @@ class Matcher(actorSystem: ActorSystem,
 }
 
 object Matcher extends ScorexLogging {
-  type RequestId       = UUID
+  type RequestId       = Long
   type RequestSender   = Any => Future[MatcherResponse]
   type RequestResolver = (RequestId, MatcherResponse) => Unit
-
-  def wrap[T](payload: T): Request[T] = Request(UUID.randomUUID(), payload)
 
   def apply(actorSystem: ActorSystem,
             wallet: Wallet,

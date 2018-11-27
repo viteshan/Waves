@@ -1,29 +1,40 @@
 package com.wavesplatform.matcher
+
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 import akka.actor.ActorRef
 import com.wavesplatform.matcher.Matcher.RequestId
 import com.wavesplatform.matcher.api.MatcherResponse
+import com.wavesplatform.matcher.market.MatcherActor.Request
 
 import scala.concurrent.{Future, Promise}
 
-class CommandBus {
-  private val requests = new ConcurrentHashMap[RequestId, Promise[MatcherResponse]]()
+trait CommandBus {
+  def sendRequest(matcher: ActorRef)(payload: Any): Future[MatcherResponse]
+  def resolveRequest(id: RequestId, response: MatcherResponse): Unit
+}
 
-  def sendRequest(matcher: ActorRef)(payload: Any): Future[MatcherResponse] = {
-    val request    = Matcher.wrap(payload)
-    val newPromise = Promise[MatcherResponse]()
-    val p          = Option(requests.putIfAbsent(request.id, newPromise)).getOrElse(newPromise)
+object CommandBus {
+  class Local extends CommandBus {
+    private val requests = new ConcurrentHashMap[RequestId, Promise[MatcherResponse]]()
+    private val seqNr    = new AtomicLong(0)
 
-    // ??? + cancellable in map
-    //    import actorSystem.dispatcher
-    //    actorSystem.scheduler.scheduleOnce(60.seconds) {
-    //      Option(requests.remove(id)).foreach(_.trySuccess(OperationTimedOut))
-    //    }
+    override def sendRequest(matcher: ActorRef)(payload: Any): Future[MatcherResponse] = {
+      val request    = Request(seqNr.getAndIncrement(), payload)
+      val newPromise = Promise[MatcherResponse]()
+      val p          = Option(requests.putIfAbsent(request.seqNr, newPromise)).getOrElse(newPromise)
 
-    matcher ! request
-    p.future
+      // ??? + cancellable in map
+      //    import actorSystem.dispatcher
+      //    actorSystem.scheduler.scheduleOnce(60.seconds) {
+      //      Option(requests.remove(id)).foreach(_.trySuccess(OperationTimedOut))
+      //    }
+
+      matcher ! request
+      p.future
+    }
+
+    override def resolveRequest(id: RequestId, response: MatcherResponse): Unit = Option(requests.remove(id)).foreach(_.trySuccess(response))
   }
-
-  def resolveRequest(id: RequestId, response: MatcherResponse): Unit = Option(requests.remove(id)).foreach(_.trySuccess(response))
 }
