@@ -20,7 +20,8 @@ import io.netty.channel.group.ChannelGroup
 import play.api.libs.json._
 import scorex.utils._
 
-class MatcherActor(orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
+class MatcherActor( //owner: ActorRef,
+                   orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
                    orderBookActorProps: (AssetPair, ActorRef) => Props,
                    assetDescription: ByteStr => Option[AssetDescription])
     extends PersistentActor
@@ -160,6 +161,22 @@ class MatcherActor(orderBooks: AtomicReference[Map[AssetPair, Either[Unit, Actor
 
     case RecoveryCompleted =>
       log.info("Recovery completed!")
+    //context.become(collectOrderBooks(orderBooks.get().size, Long.MaxValue))
+  }
+
+  private def collectOrderBooks(restOrderBooksNumber: Long, oldestCommandNr: Long): Receive = {
+    case OrderBookRecovered(lastProcessedCommandNr) =>
+      val updatedRestOrderBooksNumber = restOrderBooksNumber - 1
+      val updatedOldestCommandNr      = math.min(oldestCommandNr, lastProcessedCommandNr)
+
+      if (updatedRestOrderBooksNumber > 0) context.become(collectOrderBooks(updatedRestOrderBooksNumber, updatedOldestCommandNr))
+      else {
+        context.become(receiveCommand)
+        //owner ! MatcherRecovered(updatedOldestCommandNr)
+        unstashAll()
+      }
+
+    case _ => stash()
   }
 
   private def snapshotsCommands: Receive = {
@@ -276,6 +293,8 @@ object MatcherActor {
   case class OrderBookCreated(pair: AssetPair)
 
   case object GetMarkets
+
+  case class MatcherRecovered(oldestCommandNr: Long)
 
   case object Shutdown
 

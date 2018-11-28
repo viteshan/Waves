@@ -2,17 +2,20 @@ package com.wavesplatform.matcher
 
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
 
 import akka.actor.{ActorRef, ActorSystem}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.Http.ServerBinding
 import akka.pattern.gracefulStop
-import akka.stream.ActorMaterializer
+import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import akka.stream.{ActorMaterializer, OverflowStrategy}
 import com.wavesplatform.account.{Address, PrivateKeyAccount}
 import com.wavesplatform.api.http.CompositeHttpService
 import com.wavesplatform.db._
+import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
 import com.wavesplatform.matcher.api.{MatcherApiRoute, MatcherResponse, OrderBookSnapshotHttpCache}
+import com.wavesplatform.matcher.market.MatcherActor.Request
 import com.wavesplatform.matcher.market.OrderBookActor.MarketStatus
 import com.wavesplatform.matcher.market.{MatcherActor, MatcherTransactionWriter, OrderHistoryActor}
 import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook, OrderValidator}
@@ -25,7 +28,7 @@ import com.wavesplatform.wallet.Wallet
 import io.netty.channel.group.ChannelGroup
 
 import scala.concurrent.duration._
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, Future, Promise}
 import scala.util.control.NonFatal
 
 class Matcher(actorSystem: ActorSystem,
@@ -38,6 +41,8 @@ class Matcher(actorSystem: ActorSystem,
     extends ScorexLogging {
 
   import settings._
+
+  private implicit val materializer: ActorMaterializer = ActorMaterializer()(actorSystem)
 
   private val pairBuilder        = new AssetPairBuilder(settings.matcherSettings, blockchain)
   private val orderBookCache     = new ConcurrentHashMap[AssetPair, OrderBook](1000, 0.9f, 10)
@@ -66,7 +71,50 @@ class Matcher(actorSystem: ActorSystem,
     orderBooksSnapshotCache.invalidate(assetPair)
   }
 
-  private val commandBus = new CommandBus.Local
+  private val commandsConsumer = Source
+    .queue[(Long, Any)](1000, OverflowStrategy.backpressure)
+    .toMat(Sink.foreach {
+      case (nr, payload) => matcher ! Request(nr, payload)
+    })(Keep.left)
+    .run()
+
+  private val commandNr = new AtomicLong(0)
+  private val saveCommands = Flow[(Any, Promise[Long])]
+    .map {
+      case (payload, p) =>
+        val nr = commandNr.getAndIncrement()
+        p.success(nr)
+        (nr, payload)
+    }
+    .map(commandsConsumer.offer)
+
+  private val commandProducer = Source
+    .queue[(Any, Promise[Long])](1000, OverflowStrategy.backpressure)
+    .via(saveCommands)
+    .toMat(Sink.ignore)(Keep.left)
+    .run()
+
+  private val requests = new ConcurrentHashMap[RequestId, Promise[MatcherResponse]]()
+
+  private def sendRequest(payload: Any): Future[MatcherResponse] = {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    val p = Promise[Long]
+    commandProducer
+      .offer((payload, p))
+      .flatMap(_ => p.future)
+      .flatMap { nr =>
+        val newP = Promise[MatcherResponse]
+        Option(requests.putIfAbsent(nr, newP)).getOrElse(newP).future
+      }
+  }
+
+  private val resolveRequest: RequestResolver = { (requestId, response) =>
+    val newP = Promise[MatcherResponse]
+    Option(requests.putIfAbsent(requestId, newP)) match {
+      case Some(p) => p.trySuccess(response)
+      case None    => newP.trySuccess(response)
+    }
+  }
 
   lazy val matcherApiRoutes = Seq(
     MatcherApiRoute(
@@ -76,7 +124,7 @@ class Matcher(actorSystem: ActorSystem,
       orderHistory,
       p => Option(orderBooks.get()).flatMap(_.get(p)),
       p => Option(marketStatuses.get(p)),
-      commandBus.sendRequest(matcher),
+      sendRequest,
       orderBooksSnapshotCache,
       settings,
       isDuringShutdown,
@@ -100,7 +148,7 @@ class Matcher(actorSystem: ActorSystem,
       matcherSettings,
       blockchain.assetDescription,
       transactionCreator.createTransaction,
-      commandBus.resolveRequest
+      resolveRequest
     ),
     MatcherActor.name
   )
@@ -113,8 +161,16 @@ class Matcher(actorSystem: ActorSystem,
 
   def shutdown(): Unit = {
     log.info("Shutting down matcher")
+
     Await.result(matcherServerBinding.unbind(), 10.seconds)
+
     val stopMatcherTimeout = 5.minutes
+    List(commandProducer, commandsConsumer).foreach { x =>
+      x.complete()
+      Await.result(x.watchCompletion(), stopMatcherTimeout)
+    }
+    materializer.shutdown()
+
     orderBooksSnapshotCache.close()
     Await.result(gracefulStop(matcher, stopMatcherTimeout, MatcherActor.Shutdown), stopMatcherTimeout)
     Await.result(gracefulStop(orderHistory, stopMatcherTimeout), stopMatcherTimeout)

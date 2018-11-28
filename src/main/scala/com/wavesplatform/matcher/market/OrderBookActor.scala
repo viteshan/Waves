@@ -24,7 +24,7 @@ import play.api.libs.json._
 
 import scala.annotation.tailrec
 
-class OrderBookActor(parent: ActorRef,
+class OrderBookActor(owner: ActorRef,
                      assetPair: AssetPair,
                      updateSnapshot: OrderBook => Unit,
                      updateMarketStatus: MarketStatus => Unit,
@@ -37,7 +37,7 @@ class OrderBookActor(parent: ActorRef,
     with ScorexLogging {
 
   override def persistenceId: String       = OrderBookActor.name(assetPair)
-  private var lastProcessedCommandNr: Long = 0L
+  private var lastProcessedCommandNr: Long = -1L
 
   private val matchTimer = Kamon.timer("matcher.orderbook.match").refine("pair" -> assetPair.toString)
   private var orderBook  = OrderBook.empty
@@ -55,7 +55,7 @@ class OrderBookActor(parent: ActorRef,
   private def fullCommands: Receive = readOnlyCommands orElse executeCommands orElse snapshotsCommands
 
   private def executeCommands: Receive = {
-    case Request(requestId, payload) =>
+    case Request(requestId, payload) if requestId > lastProcessedCommandNr =>
       payload match {
         case order: Order            => onAddOrder(requestId, order)
         case CancelOrder(_, orderId) => onCancelOrder(requestId, orderId)
@@ -223,10 +223,13 @@ class OrderBookActor(parent: ActorRef,
   override def receiveRecover: Receive = {
     case RecoveryCompleted =>
       updateSnapshot(orderBook)
+      owner ! OrderBookRecovered(lastProcessedCommandNr)
       log.debug(s"Recovery completed: $orderBook")
 
     case SnapshotOffer(_, snapshot: Snapshot) =>
       orderBook = snapshot.orderBook
+      lastProcessedCommandNr = snapshot.lastProcessedCommandNr
+
       refreshMarketStatus()
       if (settings.recoverOrderHistory) {
         val orders = (orderBook.asks.valuesIterator ++ orderBook.bids.valuesIterator).flatten
@@ -285,4 +288,6 @@ object OrderBookActor {
 
   case class Snapshot(lastProcessedCommandNr: Long, orderBook: OrderBook)
 
+  // Internal messages
+  case class OrderBookRecovered(lastProcessedCommandNr: Long)
 }
