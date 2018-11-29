@@ -2,7 +2,7 @@ package com.wavesplatform.matcher.market
 
 import akka.actor.{ActorRef, Props}
 import akka.persistence._
-import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
+import com.wavesplatform.matcher.Matcher.{RequestNr, RequestResolver}
 import com.wavesplatform.matcher._
 import com.wavesplatform.matcher.api._
 import com.wavesplatform.matcher.market.MatcherActor.Request
@@ -55,20 +55,20 @@ class OrderBookActor(owner: ActorRef,
   private def fullCommands: Receive = readOnlyCommands orElse executeCommands orElse snapshotsCommands
 
   private def executeCommands: Receive = {
-    case Request(requestId, payload) if requestId > lastProcessedCommandNr =>
-      payload match {
-        case order: Order            => onAddOrder(requestId, order)
-        case CancelOrder(_, orderId) => onCancelOrder(requestId, orderId)
-        case _: DeleteOrderBookRequest =>
+    case x: Request if x.seqNr > lastProcessedCommandNr =>
+      x match {
+        case x: Request.Place  => onAddOrder(x.seqNr, x.payload)
+        case x: Request.Cancel => onCancelOrder(x.seqNr, x.inner.orderId)
+        case x: Request.DeleteOrderBook =>
           updateSnapshot(OrderBook.empty)
           orderBook.asks.values
             .++(orderBook.bids.values)
             .flatten
             .foreach(x => context.system.eventStream.publish(Events.OrderCanceled(x, unmatchable = false)))
-          resolveRequest(requestId, GetOrderBookResponse(OrderBookResult(time.correctedTime(), assetPair, Seq(), Seq())))
+          resolveRequest(x.seqNr, GetOrderBookResponse(OrderBookResult(time.correctedTime(), assetPair, Seq(), Seq())))
           context.stop(self)
       }
-      lastProcessedCommandNr = requestId
+      lastProcessedCommandNr = x.seqNr
   }
 
   private def snapshotsCommands: Receive = {
@@ -89,7 +89,7 @@ class OrderBookActor(owner: ActorRef,
       sender() ! GetOrdersResponse(orderBook.bids.values.flatten.toSeq)
   }
 
-  private def onCancelOrder(requestId: RequestId, orderIdToCancel: ByteStr): Unit =
+  private def onCancelOrder(requestId: RequestNr, orderIdToCancel: ByteStr): Unit =
     OrderBook.cancelOrder(orderBook, orderIdToCancel) match {
       case Some(oc) =>
         handleCancelEvent(oc)
@@ -99,7 +99,7 @@ class OrderBookActor(owner: ActorRef,
         resolveRequest(requestId, OrderCancelRejected("Order not found"))
     }
 
-  private def onAddOrder(requestId: RequestId, order: Order): Unit = {
+  private def onAddOrder(requestId: RequestNr, order: Order): Unit = {
     log.trace(s"Order accepted: '${order.id()}' in '${order.assetPair.key}', trying to match ...")
     matchTimer.measure(matchOrder(LimitOrder(order)))
     resolveRequest(requestId, OrderAccepted(order))

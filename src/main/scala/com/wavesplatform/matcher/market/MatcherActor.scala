@@ -5,7 +5,9 @@ import java.util.concurrent.atomic.AtomicReference
 import akka.actor.{Actor, ActorRef, PoisonPill, Props, Terminated}
 import akka.persistence.{PersistentActor, RecoveryCompleted, _}
 import com.google.common.base.Charsets
-import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
+import com.google.common.primitives.Longs
+import com.wavesplatform.crypto.DigestSize
+import com.wavesplatform.matcher.Matcher.{RequestNr, RequestResolver}
 import com.wavesplatform.matcher.MatcherSettings
 import com.wavesplatform.matcher.api.{DuringShutdown, OrderBookUnavailable}
 import com.wavesplatform.matcher.market.OrderBookActor._
@@ -20,7 +22,7 @@ import io.netty.channel.group.ChannelGroup
 import play.api.libs.json._
 import scorex.utils._
 
-class MatcherActor( //owner: ActorRef,
+class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
                    orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
                    orderBookActorProps: (AssetPair, ActorRef) => Props,
                    assetDescription: ByteStr => Option[AssetDescription])
@@ -99,20 +101,20 @@ class MatcherActor( //owner: ActorRef,
   private def forwardToOrderBook: Receive = {
     case GetMarkets => sender() ! tradedPairs.values.toSeq
 
-    case request @ Request(_, deleteOrder: DeleteOrderBookRequest) =>
-      runFor(deleteOrder.assetPair) { (sender, ref) =>
+    case request: Request.DeleteOrderBook =>
+      runFor(request.assetPair) { (sender, ref) =>
         ref.tell(request, sender)
         orderBooks.getAndUpdate(_.filterNot { x =>
           x._2.right.exists(_ == ref)
         })
 
-        tradedPairs -= deleteOrder.assetPair
+        tradedPairs -= request.assetPair
         deleteMessages(lastSequenceNr)
         saveSnapshot(Snapshot(tradedPairs.keySet))
       }
 
-    case request @ Request(_, x: Order)        => runFor(x.assetPair)((_, orderBook) => orderBook ! request)
-    case request @ Request(_, x: HasAssetPair) => runFor(x.assetPair)((_, orderBook) => orderBook ! request)
+    case x: Request.Place  => runFor(x.payload.assetPair)((_, orderBook) => orderBook ! x)
+    case x: Request.Cancel => runFor(x.inner.assetPair)((_, orderBook) => orderBook ! x)
 
     case Shutdown =>
       shutdownStatus = shutdownStatus.copy(
@@ -148,11 +150,7 @@ class MatcherActor( //owner: ActorRef,
   }
 
   override def receiveRecover: Receive = {
-    case OrderBookCreated(pair) =>
-      if (orderBook(pair).isEmpty) {
-        log.info(s"Order book created for $pair")
-        createOrderBook(pair)
-      }
+    case OrderBookCreated(pair) => if (orderBook(pair).isEmpty) createOrderBook(pair)
 
     case SnapshotOffer(metadata, snapshot: Snapshot) =>
       lastSnapshotSequenceNr = metadata.sequenceNr
@@ -160,8 +158,13 @@ class MatcherActor( //owner: ActorRef,
       snapshot.tradedPairsSet.foreach(createOrderBook)
 
     case RecoveryCompleted =>
-      log.info("Recovery completed!")
-    //context.become(collectOrderBooks(orderBooks.get().size, Long.MaxValue))
+      if (orderBooks.get().isEmpty) {
+        log.info("Recovery completed!")
+        recoveryCompletedWithCommandNr(-1)
+      } else {
+        log.info(s"Recovery completed, waiting order books to restore: ${orderBooks.get().keys.mkString(", ")}")
+        context.become(collectOrderBooks(orderBooks.get().size, Long.MaxValue))
+      }
   }
 
   private def collectOrderBooks(restOrderBooksNumber: Long, oldestCommandNr: Long): Receive = {
@@ -172,7 +175,20 @@ class MatcherActor( //owner: ActorRef,
       if (updatedRestOrderBooksNumber > 0) context.become(collectOrderBooks(updatedRestOrderBooksNumber, updatedOldestCommandNr))
       else {
         context.become(receiveCommand)
-        //owner ! MatcherRecovered(updatedOldestCommandNr)
+        recoveryCompletedWithCommandNr(updatedOldestCommandNr)
+        unstashAll()
+      }
+
+    case Terminated(ref) =>
+      orderBooks.getAndUpdate { m =>
+        childrenNames.get(ref).fold(m)(m.updated(_, Left(())))
+      }
+
+      val updatedRestOrderBooksNumber = restOrderBooksNumber - 1
+      if (updatedRestOrderBooksNumber > 0) context.become(collectOrderBooks(updatedRestOrderBooksNumber, oldestCommandNr))
+      else {
+        context.become(receiveCommand)
+        recoveryCompletedWithCommandNr(oldestCommandNr)
         unstashAll()
       }
 
@@ -241,7 +257,8 @@ class MatcherActor( //owner: ActorRef,
 object MatcherActor {
   def name = "matcher"
 
-  def props(validateAssetPair: AssetPair => Either[String, AssetPair],
+  def props(recoveryCompletedWithCommandNr: Long => Unit,
+            validateAssetPair: AssetPair => Either[String, AssetPair],
             orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
             updateSnapshot: AssetPair => OrderBook => Unit,
             updateMarketStatus: AssetPair => MarketStatus => Unit,
@@ -253,6 +270,7 @@ object MatcherActor {
             requestResolver: RequestResolver): Props =
     Props(
       new MatcherActor(
+        recoveryCompletedWithCommandNr,
         orderBooks,
         (assetPair, matcher) =>
           OrderBookActor
@@ -284,7 +302,33 @@ object MatcherActor {
     def tryComplete(): Unit  = if (isCompleted) onComplete()
   }
 
-  case class Request[T](seqNr: RequestId, payload: T)
+  trait Request {
+    def seqNr: RequestNr
+  }
+
+  object Request {
+    case class DeleteOrderBook(seqNr: RequestNr, assetPair: AssetPair) extends Request
+    case class Place(seqNr: RequestNr, payload: Order)                 extends Request
+    case class Cancel(seqNr: RequestNr, inner: CancelOrder)            extends Request
+
+    def toBytes(x: Request): Array[Byte] = Longs.toByteArray(x.seqNr) ++ {
+      x match {
+        case x: DeleteOrderBook => (1: Byte) +: x.assetPair.bytes
+        case x: Place           => (2: Byte) +: x.payload.version +: x.payload.bytes()
+        case x: Cancel          => (3: Byte) +: (x.inner.assetPair.bytes ++ x.inner.orderId.arr)
+      }
+    }
+    def fromBytes(xs: Array[Byte]): Request = {
+      val seqNr = Longs.fromByteArray(xs.take(8))
+      xs.drop(8).head match {
+        case 1 => DeleteOrderBook(seqNr, AssetPair.fromBytes(xs.drop(9)))
+        case 2 => Place(seqNr, Order.fromBytes(xs.drop(9)))
+        case 3 =>
+          val assetPair = AssetPair.fromBytes(xs.drop(9))
+          Cancel(seqNr, CancelOrder(assetPair, ByteStr(xs.takeRight(DigestSize))))
+      }
+    }
+  }
 
   case object SaveSnapshot
 

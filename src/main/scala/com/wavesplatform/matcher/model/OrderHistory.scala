@@ -73,7 +73,7 @@ class OrderHistory(db: DB, settings: MatcherSettings) extends ScorexLogging {
         // We need to not add the same orders to index during recovery
         // Recovery happens from a snapshot + commands
         val senderAddress = order.senderPublicKey.toAddress
-        if (!indexes.active.isNewest(rw, senderAddress, order.id())) indexes.active.add(rw, senderAddress, order.assetPair, order.id())
+        if (!indexes.active.has(rw, senderAddress, order.id())) indexes.active.add(rw, senderAddress, order.assetPair, order.id())
       }
     }
   }

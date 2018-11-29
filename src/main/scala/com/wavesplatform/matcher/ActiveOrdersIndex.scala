@@ -51,9 +51,7 @@ class ActiveOrdersIndex(address: Address, maxElements: Int) {
     ro.read(MatcherKeys.ActiveOrdersKeyName, prefix, seek = nodeKey(oldestIdx).keyBytes, n = Int.MaxValue)(readNode)
   }
 
-  def isNewest(ro: ReadOnlyDB, id: Id): Boolean = ro.get(newestIdxKey).fold(false) { newestIdx =>
-    ro.get(nodeKey(newestIdx)).exists(_.id == id)
-  }
+  def has(ro: ReadOnlyDB, id: Id): Boolean = ro.get(orderIdxKey(id)).nonEmpty
 
   private def findNewerIdx(ro: ReadOnlyDB, thanIdx: Int): Option[Index] = {
     ro.read(MatcherKeys.ActiveOrdersKeyName, prefix, seek = nodeKey(thanIdx + 1).keyBytes, n = 1)(readIdx).headOption

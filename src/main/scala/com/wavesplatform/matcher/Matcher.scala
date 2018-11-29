@@ -2,20 +2,19 @@ package com.wavesplatform.matcher
 
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.{AtomicLong, AtomicReference}
+import java.util.concurrent.atomic.AtomicReference
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.actor.{ActorRef, ActorSystem, Cancellable}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.Http.ServerBinding
 import akka.pattern.gracefulStop
-import akka.stream.scaladsl.{Flow, Keep, Sink, Source}
+import akka.stream.scaladsl.{Keep, Sink, Source}
 import akka.stream.{ActorMaterializer, OverflowStrategy}
 import com.wavesplatform.account.{Address, PrivateKeyAccount}
 import com.wavesplatform.api.http.CompositeHttpService
 import com.wavesplatform.db._
-import com.wavesplatform.matcher.Matcher.{RequestId, RequestResolver}
+import com.wavesplatform.matcher.Matcher.{RequestNr, RequestResolver}
 import com.wavesplatform.matcher.api.{MatcherApiRoute, MatcherResponse, OrderBookSnapshotHttpCache}
-import com.wavesplatform.matcher.market.MatcherActor.Request
 import com.wavesplatform.matcher.market.OrderBookActor.MarketStatus
 import com.wavesplatform.matcher.market.{MatcherActor, MatcherTransactionWriter, OrderHistoryActor}
 import com.wavesplatform.matcher.model.{ExchangeTransactionCreator, OrderBook, OrderValidator}
@@ -71,30 +70,19 @@ class Matcher(actorSystem: ActorSystem,
     orderBooksSnapshotCache.invalidate(assetPair)
   }
 
-  private val commandsConsumer = Source
-    .queue[(Long, Any)](1000, OverflowStrategy.backpressure)
-    .toMat(Sink.foreach {
-      case (nr, payload) => matcher ! Request(nr, payload)
-    })(Keep.left)
-    .run()
+  private val localQueue                            = new LocalPersistedQueue(db)
+  private var commandsConsumer: Option[Cancellable] = None
 
-  private val commandNr = new AtomicLong(0)
-  private val saveCommands = Flow[(Any, Promise[Long])]
-    .map {
-      case (payload, p) =>
-        val nr = commandNr.getAndIncrement()
-        p.success(nr)
-        (nr, payload)
-    }
-    .map(commandsConsumer.offer)
+  private val saveCommands = Sink.foreach[(Any, Promise[Long])] {
+    case (payload, p) => p.success(localQueue.enqueue(payload))
+  }
 
   private val commandProducer = Source
     .queue[(Any, Promise[Long])](1000, OverflowStrategy.backpressure)
-    .via(saveCommands)
-    .toMat(Sink.ignore)(Keep.left)
+    .toMat(saveCommands)(Keep.left)
     .run()
 
-  private val requests = new ConcurrentHashMap[RequestId, Promise[MatcherResponse]]()
+  private val requests = new ConcurrentHashMap[RequestNr, Promise[MatcherResponse]]()
 
   private def sendRequest(payload: Any): Future[MatcherResponse] = {
     import scala.concurrent.ExecutionContext.Implicits.global
@@ -108,6 +96,7 @@ class Matcher(actorSystem: ActorSystem,
       }
   }
 
+  // todo unnecessary during recovery
   private val resolveRequest: RequestResolver = { (requestId, response) =>
     val newP = Promise[MatcherResponse]
     Option(requests.putIfAbsent(requestId, newP)) match {
@@ -139,6 +128,17 @@ class Matcher(actorSystem: ActorSystem,
 
   lazy val matcher: ActorRef = actorSystem.actorOf(
     MatcherActor.props(
+      nr => {
+        println(s"==> RECOVERED WITH $nr")
+        var lastUnreadOffset = nr + 1
+        commandsConsumer = Some(
+          actorSystem.scheduler.schedule(0.seconds, 100.millis) {
+            val requests = localQueue.getFrom(lastUnreadOffset)
+            lastUnreadOffset = requests.lastOption.fold(lastUnreadOffset)(_.seqNr + 1)
+            requests.foreach(matcher ! _)
+          }(actorSystem.dispatcher)
+        )
+      },
       pairBuilder.validateAssetPair,
       orderBooks,
       updateOrderBookCache,
@@ -165,11 +165,9 @@ class Matcher(actorSystem: ActorSystem,
     Await.result(matcherServerBinding.unbind(), 10.seconds)
 
     val stopMatcherTimeout = 5.minutes
-    List(commandProducer, commandsConsumer).foreach { x =>
-      x.complete()
-      Await.result(x.watchCompletion(), stopMatcherTimeout)
-    }
-    materializer.shutdown()
+    commandProducer.complete()
+    Await.result(commandProducer.watchCompletion(), stopMatcherTimeout)
+    commandsConsumer.foreach(_.cancel())
 
     orderBooksSnapshotCache.close()
     Await.result(gracefulStop(matcher, stopMatcherTimeout, MatcherActor.Shutdown), stopMatcherTimeout)
@@ -209,9 +207,9 @@ class Matcher(actorSystem: ActorSystem,
 }
 
 object Matcher extends ScorexLogging {
-  type RequestId       = Long
+  type RequestNr       = Long
   type RequestSender   = Any => Future[MatcherResponse]
-  type RequestResolver = (RequestId, MatcherResponse) => Unit
+  type RequestResolver = (RequestNr, MatcherResponse) => Unit
 
   def apply(actorSystem: ActorSystem,
             wallet: Wallet,

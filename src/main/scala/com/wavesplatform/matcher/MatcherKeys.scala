@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 import com.google.common.primitives.{Ints, Longs, Shorts}
 import com.wavesplatform.account.Address
 import com.wavesplatform.database.Key
+import com.wavesplatform.matcher.market.MatcherActor.Request
 import com.wavesplatform.matcher.model.OrderInfo
 import com.wavesplatform.state.ByteStr
 import com.wavesplatform.transaction.AssetId
@@ -17,18 +18,7 @@ object MatcherKeys {
 
   val version: Key[Int] = intKey("matcher-version", 0, default = 1)
 
-  def order(orderId: ByteStr): Key[Option[Order]] =
-    Key.opt(
-      "matcher-order",
-      bytes(1, orderId.arr),
-      xs =>
-        xs.head match {
-          case 1     => OrderV1.parseBytes(xs.tail).get
-          case 2     => OrderV2.parseBytes(xs.tail).get
-          case other => throw new IllegalArgumentException(s"Unexpected order version: $other")
-      },
-      o => o.version +: o.bytes()
-    )
+  def order(orderId: ByteStr): Key[Option[Order]] = Key.opt("matcher-order", bytes(1, orderId.arr), Order.fromBytes, o => o.version +: o.bytes())
 
   val OrderInfoPrefix: Short = 2
 
@@ -123,4 +113,12 @@ object MatcherKeys {
 
   def lastCommandTimestamp(address: Address): Key[Option[Long]] =
     Key.opt("matcher-last-command-timestamp", bytes(18, address.bytes.arr), Longs.fromByteArray, Longs.toByteArray)
+
+  val lpqNewestIdx: Key[Long] = longKey("lpq-newest-idx", 19: Short, default = -1)
+
+  val LpqElementPrefix: Short            = 20
+  val LpqElementPrefixBytes: Array[Byte] = Shorts.toByteArray(LpqElementPrefix)
+  val LpqElementKeyName: String          = "lpq-element"
+  def lpqElement(idx: Long): Key[Option[Request]] =
+    Key.opt(LpqElementKeyName, bytes(LpqElementPrefix, Longs.toByteArray(idx)), Request.fromBytes, Request.toBytes)
 }

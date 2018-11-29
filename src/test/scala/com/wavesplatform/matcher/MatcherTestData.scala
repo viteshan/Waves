@@ -6,6 +6,7 @@ import com.google.common.primitives.{Bytes, Ints}
 import com.typesafe.config.ConfigFactory
 import com.wavesplatform.account.PrivateKeyAccount
 import com.wavesplatform.matcher.market.MatcherActor.Request
+import com.wavesplatform.matcher.market.OrderBookActor.{CancelOrder, DeleteOrderBookRequest}
 import com.wavesplatform.matcher.model.MatcherModel.Price
 import com.wavesplatform.matcher.model.{BuyLimitOrder, SellLimitOrder}
 import com.wavesplatform.settings.loadConfig
@@ -27,8 +28,10 @@ trait MatcherTestData extends NTPTime { _: Suite =>
 
   val wavesAssetGen: Gen[Option[Array[Byte]]] = Gen.const(None)
 
-  private val seqNr                   = new AtomicLong(0)
-  def wrap[T](payload: T): Request[T] = Request(seqNr.getAndIncrement(), payload)
+  private val seqNr                            = new AtomicLong(-1)
+  def wrap(x: Order): Request                  = Request.Place(seqNr.incrementAndGet(), x)
+  def wrap(x: CancelOrder): Request            = Request.Cancel(seqNr.incrementAndGet(), x)
+  def wrap(x: DeleteOrderBookRequest): Request = Request.DeleteOrderBook(seqNr.incrementAndGet(), x.assetPair)
 
   def assetIdGen(prefix: Byte) = Gen.listOfN(signatureSize - 1, Arbitrary.arbitrary[Byte]).map(xs => Some(ByteStr(Array(prefix, xs: _*))))
   val distinctPairGen: Gen[AssetPair] = for {
