@@ -54,6 +54,7 @@ class OrderBookActor(owner: ActorRef,
 
   private def fullCommands: Receive = readOnlyCommands orElse executeCommands orElse snapshotsCommands
 
+  // TODO: lastUnconfirmedMessage
   private def executeCommands: Receive = {
     case x: Request if x.seqNr > lastProcessedCommandNr =>
       x match {
@@ -289,5 +290,5 @@ object OrderBookActor {
   case class Snapshot(lastProcessedCommandNr: Long, orderBook: OrderBook)
 
   // Internal messages
-  case class OrderBookRecovered(lastProcessedCommandNr: Long)
+  case class OrderBookRecovered(assetPair: AssetPair, lastProcessedCommandNr: Long)
 }

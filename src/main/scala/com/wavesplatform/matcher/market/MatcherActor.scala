@@ -22,6 +22,9 @@ import io.netty.channel.group.ChannelGroup
 import play.api.libs.json._
 import scorex.utils._
 
+import scala.collection.mutable
+
+// TODO: should send snapshot requests to OBA
 class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
                    orderBooks: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]],
                    orderBookActorProps: (AssetPair, ActorRef) => Props,
@@ -34,6 +37,9 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
   private var tradedPairs            = Map.empty[AssetPair, MarketData]
   private var childrenNames          = Map.empty[ActorRef, AssetPair]
   private var lastSnapshotSequenceNr = 0L
+
+  private val oldestCommandNrOffset = 1000L
+  private val oldestSnapshot        = mutable.PriorityQueue.empty[(AssetPair, Long)](Ordering.by[(AssetPair, Long), Long](_._2).reverse)
 
   private var shutdownStatus: ShutdownStatus = ShutdownStatus(
     initiated = false,
@@ -85,16 +91,21 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
   /**
     * @param f (sender, orderBook)
     */
-  private def runFor(pair: AssetPair)(f: (ActorRef, ActorRef) => Unit): Unit = {
+  private def runFor(request: Request)(f: (ActorRef, ActorRef) => Unit): Unit = {
     val s = sender()
     if (shutdownStatus.initiated) s ! DuringShutdown
     else
-      orderBook(pair) match {
-        case Some(Right(ob)) => f(s, ob)
-        case Some(Left(_))   => s ! OrderBookUnavailable
+      orderBook(request.assetPair) match {
+        case Some(Right(ob)) =>
+          oldestSnapshot.headOption.foreach {
+            case (oldestPair, oldestSnapshotNr) =>
+              if (request.assetPair == oldestPair && request.seqNr >= (oldestSnapshotNr + oldestCommandNrOffset)) ob ! SaveSnapshot
+          }
+          f(s, ob)
+        case Some(Left(_)) => s ! OrderBookUnavailable
         case None =>
-          val ob = createOrderBook(pair)
-          persistAsync(OrderBookCreated(pair))(_ => f(s, ob))
+          val ob = createOrderBook(request.assetPair)
+          persistAsync(OrderBookCreated(request.assetPair))(_ => f(s, ob))
       }
   }
 
@@ -102,7 +113,7 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
     case GetMarkets => sender() ! tradedPairs.values.toSeq
 
     case request: Request.DeleteOrderBook =>
-      runFor(request.assetPair) { (sender, ref) =>
+      runFor(request) { (sender, ref) =>
         ref.tell(request, sender)
         orderBooks.getAndUpdate(_.filterNot { x =>
           x._2.right.exists(_ == ref)
@@ -113,8 +124,7 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
         saveSnapshot(Snapshot(tradedPairs.keySet))
       }
 
-    case x: Request.Place  => runFor(x.payload.assetPair)((_, orderBook) => orderBook ! x)
-    case x: Request.Cancel => runFor(x.inner.assetPair)((_, orderBook) => orderBook ! x)
+    case x: Request => runFor(x)((_, orderBook) => orderBook ! x)
 
     case Shutdown =>
       shutdownStatus = shutdownStatus.copy(
@@ -168,9 +178,10 @@ class MatcherActor(recoveryCompletedWithCommandNr: Long => Unit,
   }
 
   private def collectOrderBooks(restOrderBooksNumber: Long, oldestCommandNr: Long): Receive = {
-    case OrderBookRecovered(lastProcessedCommandNr) =>
+    case OrderBookRecovered(assetPair, lastProcessedCommandNr) =>
       val updatedRestOrderBooksNumber = restOrderBooksNumber - 1
       val updatedOldestCommandNr      = math.min(oldestCommandNr, lastProcessedCommandNr)
+      oldestSnapshot.enqueue(assetPair -> lastProcessedCommandNr)
 
       if (updatedRestOrderBooksNumber > 0) context.become(collectOrderBooks(updatedRestOrderBooksNumber, updatedOldestCommandNr))
       else {
@@ -304,12 +315,17 @@ object MatcherActor {
 
   trait Request {
     def seqNr: RequestNr
+    def assetPair: AssetPair
   }
 
   object Request {
     case class DeleteOrderBook(seqNr: RequestNr, assetPair: AssetPair) extends Request
-    case class Place(seqNr: RequestNr, payload: Order)                 extends Request
-    case class Cancel(seqNr: RequestNr, inner: CancelOrder)            extends Request
+    case class Place(seqNr: RequestNr, payload: Order) extends Request {
+      override def assetPair: AssetPair = payload.assetPair
+    }
+    case class Cancel(seqNr: RequestNr, inner: CancelOrder) extends Request {
+      override def assetPair: AssetPair = inner.assetPair
+    }
 
     def toBytes(x: Request): Array[Byte] = Longs.toByteArray(x.seqNr) ++ {
       x match {

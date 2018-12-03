@@ -7,7 +7,7 @@ import akka.testkit.{ImplicitSender, TestActorRef, TestProbe}
 import com.wavesplatform.account.PrivateKeyAccount
 import com.wavesplatform.matcher.MatcherTestData
 import com.wavesplatform.matcher.api.OrderAccepted
-import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData}
+import com.wavesplatform.matcher.market.MatcherActor.{GetMarkets, MarketData, SaveSnapshot}
 import com.wavesplatform.matcher.market.MatcherActorSpecification.FailAtStartActor
 import com.wavesplatform.matcher.model.ExchangeTransactionCreator
 import com.wavesplatform.state.{AssetDescription, Blockchain, ByteStr}
@@ -111,6 +111,33 @@ class MatcherActorSpecification
 
     "delete order books" is pending
     "forward new orders to order books" is pending
+
+    "forces an order book to create a snapshot if it didn't do snapshots for a long time" in {
+      val probe = TestProbe()
+      val actor = waitInitialization(
+        TestActorRef(
+          new MatcherActor(
+            _ => (),
+            emptyOrderBookRefs,
+            (_, _) =>
+              Props(new Actor {
+                override def receive: Receive = {
+                  case SaveSnapshot => probe.ref ! SaveSnapshot
+                }
+              }),
+            blockchain.assetDescription
+          )
+        ))
+
+      val pair = AssetPair(randomAssetId, randomAssetId)
+
+      val ts = System.currentTimeMillis()
+      (1 to 1001).foreach { i =>
+        actor ! wrap(buy(pair, amount = 1000, price = 1, ts = Some(ts + i)))
+      }
+
+      probe.expectMsg(SaveSnapshot)
+    }
   }
 
   private def defaultActor(ob: AtomicReference[Map[AssetPair, Either[Unit, ActorRef]]] = emptyOrderBookRefs): TestActorRef[MatcherActor] = {

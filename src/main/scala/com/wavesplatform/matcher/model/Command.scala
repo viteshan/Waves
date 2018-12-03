@@ -6,6 +6,7 @@ import com.wavesplatform.account.Address
 import com.wavesplatform.matcher.model.MatcherModel.OrderId
 import com.wavesplatform.transaction.assets.exchange.{AssetPair, Order}
 
+// ? Remove?
 sealed trait Command {
   def id: Command.Id
 }
